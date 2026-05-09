@@ -1,89 +1,94 @@
-﻿from fastapi import FastAPI, Query
-import uvicorn
-import time
-import random
-from selenium import webdriver
-from selenium.webdriver.chrome.options import Options
-from selenium.webdriver.common.by import By
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
+from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 
-app = FastAPI()
-REGISTRATION_ID = "STUDENT_XYZ_2026"
+from app.scraper import fetch_first_article
+from app.summarizer import summarize
 
-def get_selenium_driver():
-    options = Options()
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--window-size=1365,1000")
-    # Anti-bot flags
-    options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_experimental_option("excludeSwitches", ["enable-automation"])
-    options.add_experimental_option("useAutomationExtension", False)
-    options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36")
-    
-    driver = webdriver.Chrome(options=options)
-    driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
-        "source": "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    })
-    return driver
+REGISTRATION = "FA23-BAI-013"
+NEWS_SOURCE = "Pakistan Today"
 
-def summarize_text(text):
-    if not text or len(text) < 20: return "No content available."
-    sentences = text.split(".")
-    return ". ".join(sentences[:3]).strip()
+app = FastAPI(
+    title="DevOps Quiz News Summarizer",
+    description="Selenium-powered news search and summarization API for Quiz 3.",
+    version="1.0.0",
+)
 
-def scrape_pakistan_today(keyword):
-    driver = get_selenium_driver()
-    try:
-        # Step 1: Human-like access to landing page
-        driver.get("https://www.pakistantoday.com.pk/")
-        time.sleep(random.uniform(5, 8))
-        
-        # Step 2: Access search directly
-        driver.get(f"https://www.pakistantoday.com.pk/?s={keyword}")
-        time.sleep(random.uniform(3, 5))
-        
-        # Step 3: Extract results
-        results = driver.find_elements(By.CSS_SELECTOR, "h3.entry-title a, .td-module-title a")
-        
-        if not results:
-             # Fallback: if we can't see results, check if blocked
-             title = driver.title
-             if "Just a moment" in title or "Cloudflare" in title:
-                 return {"error": "Cloudflare challenge presented. Please try again in a moment."}
-             return {"error": f"No results found for keyword: {keyword}"}
 
-        first_article = results[0]
-        article_url = first_article.get_attribute("href")
-        article_snippet = first_article.text # Fallback summary from title/snippet
+@app.get("/", response_class=HTMLResponse)
+def home() -> str:
+    return """
+    <!doctype html>
+    <html lang="en">
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <title>FA23-BAI-013 News API</title>
+        <style>
+          body {
+            margin: 0;
+            font-family: Arial, sans-serif;
+            background: #f5f7fb;
+            color: #172033;
+          }
+          main {
+            max-width: 760px;
+            margin: 0 auto;
+            padding: 56px 20px;
+          }
+          section {
+            background: white;
+            border: 1px solid #d8deea;
+            border-radius: 8px;
+            padding: 28px;
+            box-shadow: 0 8px 24px rgba(24, 32, 51, 0.08);
+          }
+          h1 {
+            margin: 0 0 12px;
+            font-size: 32px;
+          }
+          p {
+            line-height: 1.55;
+          }
+          code {
+            display: block;
+            margin-top: 16px;
+            padding: 14px;
+            border-radius: 6px;
+            background: #eef2f8;
+            overflow-wrap: anywhere;
+          }
+        </style>
+      </head>
+      <body>
+        <main>
+          <section>
+            <h1>FA23-BAI-013</h1>
+            <p><strong>News Source:</strong> Pakistan Today</p>
+            <p>This container exposes the required Selenium news summary API on port 7000.</p>
+            <code>GET /get?keyword=technology</code>
+          </section>
+        </main>
+      </body>
+    </html>
+    """
 
-        # Step 4: Try to get full content
-        try:
-            driver.get(article_url)
-            time.sleep(random.uniform(3, 4))
-            paragraphs = driver.find_elements(By.CSS_SELECTOR, "article p, .td-post-content p")
-            article_text = "\n".join([p.text for p in paragraphs if len(p.text.strip()) > 20])
-            summary = summarize_text(article_text) if article_text else article_snippet
-        except:
-            summary = article_snippet # Use the search result title as summary if blocked on article page
-
-        return {
-            "registration": REGISTRATION_ID,
-            "newssource": "Pakistan Today",
-            "keyword": keyword,
-            "url": article_url,
-            "summary": summary
-        }
-    except Exception as e:
-        return {"error": str(e)}
-    finally:
-        driver.quit()
 
 @app.get("/get")
-async def get_article(keyword: str):
-    return scrape_pakistan_today(keyword)
+def get_summary(keyword: str = Query(..., min_length=1)) -> dict[str, str]:
+    clean_keyword = keyword.strip()
+    if not clean_keyword:
+        raise HTTPException(status_code=400, detail="keyword query parameter is required")
 
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=7000)
+    article = fetch_first_article(clean_keyword)
+    summary = summarize(article.text, clean_keyword)
+
+    if not article.url:
+        summary = f"No article result was found on {NEWS_SOURCE} for keyword '{clean_keyword}'."
+
+    return {
+        "registration": REGISTRATION,
+        "newssource": NEWS_SOURCE,
+        "keyword": clean_keyword,
+        "url": article.url,
+        "summary": summary,
+    }
